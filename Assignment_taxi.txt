@@ -1,0 +1,65 @@
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+-- CREATE EXTERNAL TABLE
+
+create external table if not exists taxi
+(VendorID int, Pickup_datetime string,Dropoff_datetime string,Passenger_cnt int, trip_dist float,
+RateCodeID int, Store_fwd_flag char(1), PUlocationID int, DOlocationID int,Payment_type int, Fare_Amt float,
+Extra float, MTA_tax float, tip_amt float, Tolls_amt float,Improvement_surcharge float, Total_amt float
+) 
+row format delimited fields terminated by ','
+location '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="1");
+
+
+-- RUN QUERY ON THIS TABLE
+select * from taxi limit 10;
+
+#EDA of the Pickup_datetime column
+
+-- Display the count of rows for each year
+select year(from_unixtime(unix_timestamp(Pickup_datetime, 'yyyy-MM-dd hh:mm:ss'))) as yr, count(*)
+from taxi
+
+group by year(from_unixtime(unix_timestamp(Pickup_datetime, 'yyyy-MM-dd hh:mm:ss')));
+
+-- Display the count of rows for each month in 2017
+select month(from_unixtime(unix_timestamp(Pickup_datetime, 'yyyy-MM-dd hh:mm:ss'))) as month, count(*)
+from taxi where year(from_unixtime(unix_timestamp(Pickup_datetime, 'yyyy-MM-dd hh:mm:ss'))) = 2017
+
+group by month(from_unixtime(unix_timestamp(Pickup_datetime, 'yyyy-MM-dd hh:mm:ss')));
+
+
+-- PARTITION THE DATA  
+-- IMPORTANT: BEFORE PARTITIONING ANY TABLE, MAKE SURE YOU RUN THESE COMMANDS 
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+-- Then create partitioned bucketed ORC external table 
+
+
+create external table if not exists taxi_partitioned
+(VendorID int, Pickup_datetime string,Dropoff_datetime string,Passenger_cnt int, trip_dist float,
+RateCodeID int, Store_fwd_flag char(1), PUlocationID int, DOlocationID int,Payment_type int, Fare_Amt float,
+Extra float, MTA_tax float, tip_amt float, Tolls_amt float,Improvement_surcharge float, Total_amt float)
+partitioned by (mnth int)
+clustered by (tip_amt) into 4 buckets
+stored as orc
+location '/user/hive/warehouse/ruchitagup_taxi'
+tblproperties ("orc.compress"="SNAPPY");
+
+
+
+
+
+insert overwrite table taxi_partitioned partition(mnth)
+select VendorID, Pickup_datetime, Dropoff_datetime,Passenger_cnt, trip_dist, RateCodeID, Store_fwd_flag,
+PUlocationID , DOlocationID,Payment_type, Fare_Amt,Extra, MTA_tax, tip_amt, Tolls_amt,Improvement_surcharge,
+Total_amt, month(from_unixtime(unix_timestamp(Pickup_datetime, 'yyyy-MM-dd hh:mm:ss'))) as mnth
+from taxi where year(from_unixtime(unix_timestamp(Pickup_datetime, 'yyyy-MM-dd hh:mm:ss'))) = 2017 AND 
+Passenger_cnt !=0  and RateCodeID !=99 and Fare_Amt > 0 and extra >= 0 and (MTA_tax = 0.5 or MTA_tax = 0) and
+tip_amt >= 0 and Tolls_amt >=0 and (Improvement_surcharge = 0.3 or Improvement_surcharge = 0) and Total_amt >= 0;
+
+
+select count(*) from taxi_partitioned;
+

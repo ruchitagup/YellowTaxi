@@ -1,0 +1,299 @@
+-- Add the Jar file
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+-- CREATE EXTERNAL TABLE
+
+create external table if not exists taxi
+(VendorID int, Pickup_datetime timestamp, Dropoff_datetime timestamp,Passenger_cnt int, trip_dist float,
+RateCodeID int, Store_fwd_flag char(1), PUlocationID int, DOlocationID int,Payment_type int, Fare_Amt float,
+Extra float, MTA_tax float, tip_amt float, Tolls_amt float,Improvement_surcharge float, Total_amt float
+) 
+row format delimited fields terminated by ','
+location '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="1");
+
+
+-- RUN QUERY ON THIS TABLE
+select * from taxi limit 10;
+
+#EDA of the Pickup_datetime column
+
+-- Display the count of rows for each year
+select year(Pickup_datetime) as yr, count(*)
+from taxi group by year(Pickup_datetime);
+
+-- Display the count of rows for each month in 2017
+select month(Pickup_datetime) as month, count(*)
+from taxi where year(Pickup_datetime) = 2017
+
+group by month(Pickup_datetime);
+
+
+-- We can see that there are some rows which belong to months other than Nov and Dec. So these need to be dealt with.
+
+-- The number of records that each TPEP provider has provided -
+select VendorID, count(*) as Num from taxi group by VendorID;
+
+-- Vendor 2 has 647183 records while Vendor 1 has 527386 records
+
+-- Erroraneous Data in the following columns with respect to the Vendor -
+-- 1. Passenger count as 0
+select VendorID, count(*) as Num from taxi where Passenger_cnt=0 group by VendorID;
+
+
+-- 2. It is poosible that a taxi has been booked but cancelled immediately. So taking trip_distance=0 as a valid value.
+
+-- 3. Valid RateCodeID is 1,2,3,4,5,6 but there are records with 99 as well.
+select VendorID, RateCodeID, count(*) as Num from taxi group by VendorID, RateCodeID;
+
+
+-- 4. It is possible that a taxi has been booked but cancelled immediately. So fare _amt can be 0. so taking only
+-- fare_amt <0 as erroneous
+select VendorID, count(*) as Num from taxi where Fare_Amt < 0 group by VendorID;
+
+
+-- 5. Extra < 0
+select VendorID, count(*) as Num from taxi where Extra < 0 group by VendorID;
+
+
+-- 6.  MTA_tax can have only 2 possible values 0 and 0.5. It has errororaneous values of -0.5, 3 and 11.4
+select VendorID, count(*) as Num from taxi where MTA_tax <> 0 and MTA_tax <> 0.5 group by VendorID;
+
+
+-- 7. Tip_amount cannot have negative values.
+select VendorID, count(*) as Num from taxi where tip_amt < 0 group by VendorID;
+
+
+-- 8. Tolls_amount cannot have negative values.
+select VendorID, count(*) as Num from taxi where Tolls_amt < 0 group by VendorID;
+
+
+-- 9. Improvement_surcharge can have only 0.30 and 0 as the possible values, but the data has 1 and -0.3 values as well.
+select VendorID, Improvement_surcharge, count(*) as Num from taxi group by VendorID, Improvement_surcharge;
+
+
+-- 10. Total_amount cannot have negative values
+select VendorID, count(*) as Num from taxi where Total_amt < 0 group by VendorID;
+
+
+--COUNT OF ERRONEOUS RECORDS ARE -
+--column Name/TPEP Provider     Vendor 1(Creative Mobile Technologies, LLC)  Vendor 2(VeriFone Inc.)
+--Passenger_count=0                            6813                                      11
+--RateCodeID=99                                   8                                       1
+--fare_amount<0                                   0                                     558
+--extra<0                                         1                                     285
+--mta_tax(other than 0 and 0.5)     		  1				        547
+--tip_amount<0				          0				          4
+--tolls_amount<0				  0					  3
+--improvement_surcharge(other than 0.3 and 0)	  0				        562
+--total_amount<0  			          0				        558
+
+-- VENDOR ID 1 is supplying more erroneous data for Passenger_count and RateCodeID whereas VENDOR ID 2 
+-- i.e VeriFone Inc. is supplying Erroneous Data for the rest of the above columns.
+
+
+-- PARTITION THE DATA  
+-- IMPORTANT: BEFORE PARTITIONING ANY TABLE, MAKE SURE YOU RUN THESE COMMANDS 
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+-- Then create partitioned bucketed ORC external table 
+
+
+-- Creating Partitions on month and day and buckets as 4 in each partition.
+
+create external table if not exists taxi_partitioned
+(VendorID int, Pickup_datetime timestamp,Dropoff_datetime timestamp,Passenger_cnt int, trip_dist float,
+RateCodeID int, Store_fwd_flag char(1), PUlocationID int, DOlocationID int, Payment_type int, Fare_Amt float,
+Extra float, MTA_tax float, tip_amt float, Tolls_amt float,Improvement_surcharge float, Total_amt float)
+partitioned by (mnth int, day int)
+clustered by (tip_amt) into 4 buckets 
+stored as orc
+ location '/user/hive/warehouse/ruchitagup_taxi' 
+tblproperties ("orc.compress"="SNAPPY");
+
+-- Insert the Clean Data from the taxi table to the newly created partitioned table
+
+insert overwrite table taxi_partitioned partition(mnth, day) 
+
+select VendorID, Pickup_datetime, Dropoff_datetime,Passenger_cnt, trip_dist, RateCodeID, Store_fwd_flag, PUlocationID,
+DOlocationID,Payment_type, Fare_Amt,Extra, MTA_tax, tip_amt, Tolls_amt,Improvement_surcharge,
+Total_amt, 
+month(Pickup_datetime) as mnth, day(Pickup_datetime) as day 
+
+from taxi where year(Pickup_datetime) = 2017 AND (month(Pickup_datetime) = 11 or month(Pickup_datetime) = 12) and
+
+                Passenger_cnt !=0  and RateCodeID !=99 and Fare_Amt >= 0 and extra >= 0 and (MTA_tax = 0.5 or 
+                MTA_tax = 0) and
+ tip_amt >= 0 and Tolls_amt >=0 and (Improvement_surcharge = 0.3 or
+                Improvement_surcharge = 0) and Total_amt >= 0;
+
+
+select count(*) from taxi_partitioned;
+
+
+
+--Analysis-I
+
+-- 1. Compare the overall average fare per trip for November and December.
+
+select month(Pickup_datetime) as Month, round(avg(Fare_Amt),2) as Average from taxi_partitioned 
+group by month(Pickup_datetime);
+
+-- 2. Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’? Do most --    people travel solo or with other people?
+
+select Passenger_cnt, count(*) as count from taxi_partitioned group by Passenger_cnt order by count desc;
+
+--Yes most people travel solo.
+
+-- 3. Which is the most preferred mode of payment?
+select Payment_type, count(*) as count from taxi_partitioned group by Payment_type order by count desc;
+
+
+--Payment type = 1 i.e credit card is the most preferred mode of payment
+
+
+-- 4. What is the average tip paid per trip? Compare the average tip with the 25th, 50th and 75th percentiles and 
+-- comment whether the ‘average tip’ is a representative statistic (of the central tendency) of ‘tip amount paid’. 
+-- Hint: You may use percentile_approx(DOUBLE col, p): Returns an approximate pth percentile of a numeric column 
+-- (including floating point types) in the group.
+
+select round(avg(tip_amt),2) as Average_Tip, round(percentile_approx(tip_amt, 0.25),2) as 25th_percentile,
+ 
+      round(percentile_approx(tip_amt, 0.5),2) as 50th_percentile, 
+       round(percentile_approx(tip_amt, 0.75),2) as 75th_percentile
+       
+from taxi_partitioned;
+
+
+-- The average tip paid per trip is $1.85. The 25th percentile is $0, 50th percentile is $1.36 and 75th percentile is
+-- $2.45.
+-- The average tip is not a representative statistic of the central tendency of the tip amount.
+
+-- 5. Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+
+select count(*) as CNT from taxi_partitioned where Extra > 0;
+--CNT = 539580
+select count(*) as CNT from taxi_partitioned;
+--CNT = 1167165
+--Fraction of total trips that have an extra charge levied is 539580/1167165 = 0.46
+
+--or it can be done using one query as below -
+
+select cnt_extra/total as fraction from
+
+(select count(extra) as cnt_extra, max(total_count) as total from
+
+(select extra, total_count from
+
+(select extra, count(*) over () as  total_count
+
+from taxi_partitioned
+)S where extra > 0
+)T
+
+)U;
+
+
+--Analysis-II
+
+-- 1. What is the correlation between the number of passengers on any given trip, and the tip paid per trip? Do multiple 
+--    travellers tip more compared to solo travellers? 
+
+select CORR(Passenger_cnt, tip_amt) from taxi_partitioned;
+
+
+-- -0.005. Since the correlation is negative, it means as the Passenger_cnt increases the tip_amt decreases. 
+
+select avg(tip_amt) from taxi_partitioned where passenger_cnt = 1;
+
+
+select avg(tip_amt) from taxi_partitioned where passenger_cnt != 1;
+
+-- tip_amt is 1.86 for solo passenger and 1.84 for multiple travellers. Therefore, Multiple travellers tip less as
+-- compared to solo travellers.
+
+--  2. Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20. Calculate the
+--     percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+
+
+SELECT VALUE, CNT, ROUND(CNT/TOTAL,2) AS PERCENTAGE_SHARE FROM
+
+(SELECT VALUE, COUNT(*) AS CNT, MAX(TOTAL_TRIPS) AS TOTAL FROM
+
+(SELECT TIP_AMT, COUNT(*) OVER () AS TOTAL_TRIPS,
+
+CASE
+
+WHEN (TIP_AMT >= 0 AND TIP_AMT < 5) THEN '0-5'
+
+WHEN (TIP_AMT >= 5 AND TIP_AMT < 10) THEN '5-10'
+
+WHEN (TIP_AMT >= 10 AND TIP_AMT < 15) THEN '10-15'
+
+WHEN (TIP_AMT >= 15 AND TIP_AMT < 20) THEN '15-20'
+
+ELSE '>=20'
+
+END AS VALUE FROM 
+TAXI_PARTITIONED)S
+
+GROUP BY VALUE)T;
+
+
+--3.  Which month has a greater average ‘speed’ - November or December?
+
+SELECT MNTH, AVG(SPEED) FROM
+
+(SELECT MNTH, (TRIP_DIST/TIME_TAKEN) AS SPEED FROM
+
+(SELECT TRIP_DIST, month(Pickup_datetime) AS MNTH, 
+
+ ((unix_timestamp(DROPOFF_DATETIME)-unix_timestamp(PICKUP_DATETIME)) / 3600) AS TIME_TAKEN
+
+FROM TAXI_PARTITIONED
+
+)S
+
+)T
+
+GROUP BY MNTH;
+
+-- AVERAGE SPEED IN NOV IS 10.979 MPH AND DECEMBER IS 11.075 MPH
+-- DECEMBER HAS A GREATER AVERAGE SPEED.
+
+--  4.  Analyse the average speed of the most happening days of the year, i.e. 31st December (New year’s eve) and 25th --      December (Christmas) and compare it with the overall average. 
+
+-- ASSUMING OVERALL AVERAGE MEANS THE AVERAGE SPEED OF BOTH THE MONTH
+
+
+SELECT DATE, AVG(SPEED) AS SPEED, MAX(AVERAGE_SPEED) AS OVERALL_SPEED FROM
+
+(SELECT DATE, MNTH, SPEED, AVERAGE_SPEED FROM
+
+(SELECT DATE, MNTH, SPEED, AVG(SPEED) OVER () AS AVERAGE_SPEED FROM
+
+(SELECT DATE, MNTH, (TRIP_DIST/TIME_TAKEN) AS SPEED FROM
+
+(SELECT DAY(PICKUP_DATETIME) AS DATE, MONTH(PICKUP_DATETIME) AS MNTH, TRIP_DIST,
+       
+        ((unix_timestamp(DROPOFF_DATETIME)-unix_timestamp(PICKUP_DATETIME)) / 3600) AS TIME_TAKEN
+
+FROM TAXI_PARTITIONED
+
+)S
+
+)T
+
+)U
+
+WHERE ((DATE=25 OR DATE=31) AND MNTH=12)
+
+)V
+
+GROUP BY DATE;
+
+
+-- AVERAGE SPEED FOR 25TH DEC - 15.24 MPH
+-- AVERAGE SPEED FOR 31ST DEC - 13.21 MPH
+-- OVERALL AVERAGE SPEED - 11.03 MPH
